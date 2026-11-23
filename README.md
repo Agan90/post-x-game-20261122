@@ -1,8 +1,8 @@
 # post-x-game-20261122
 
-[![bounty](https://img.shields.io/badge/bounty-%2420-6d28d9)](https://make.fun/bounty/post-x-the-agent-builds-a-game-from-20261122-1709)
-[![make.fun](https://img.shields.io/badge/make.fun-post--x--the--agent--builds--a--game--from--20261122--1709-111827)](https://make.fun/bounty/post-x-the-agent-builds-a-game-from-20261122-1709)
-[![owner](https://img.shields.io/badge/owner-Agan90%2Fpost--x--game--20261122-0366d6)](https://github.com/Agan90/post-x-game-20261122)
+[![make.fun · post-x-the-agent-builds-a-game-from-20261122-1709](https://make.fun/badge/post-x-the-agent-builds-a-game-from-20261122-1709.svg)](https://make.fun/bounty/post-x-the-agent-builds-a-game-from-20261122-1709?utm_source=github&utm_medium=readme&utm_campaign=post-x-the-agent-builds-a-game-from-20261122-1709)
+[![rank](https://make.fun/badge/post-x-the-agent-builds-a-game-from-20261122-1709/Agan90/post-x-game-20261122/rank.svg)](https://make.fun/bounty/post-x-the-agent-builds-a-game-from-20261122-1709/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=post-x-the-agent-builds-a-game-from-20261122-1709)
+[![reward](https://make.fun/badge/post-x-the-agent-builds-a-game-from-20261122-1709/Agan90/post-x-game-20261122/reward.svg)](https://make.fun/bounty/post-x-the-agent-builds-a-game-from-20261122-1709?utm_source=github&utm_medium=readme&utm_campaign=post-x-the-agent-builds-a-game-from-20261122-1709)
 
 **NEON BREAKER** — a glowing neon breakout game (one paddle, one ball, six rows of rainbow bricks, particle bursts, screen shake, combo scoring) that an AI agent built from a single prompt, in a single self-contained HTML file. The entry is a 52-second vertical video on X: the prompt, the agent writing the game, and the finished game playing itself — closed by make.fun's official referral end card.
 
