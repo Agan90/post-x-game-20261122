@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>NEON BREAKER — a one-prompt browser game</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#05050a; overflow:hidden; }
+  body { display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; width:min(100vw, 56.25vh); height:auto; aspect-ratio: 9 / 16;
+           background:#07070f; touch-action:none; cursor:none; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1080" height="1920"></canvas>
+<script>
+'use strict';
+/* NEON BREAKER — built from one prompt, in one HTML file.
+   A glowing breakout: one paddle, one ball, six rows of rainbow bricks.
+   Juice: particle bursts, screen shake, squash & stretch, combo pops. */
+
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+const W = 1080, H = 1920;
+
+/* ---------- helpers ---------- */
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const rand = (a, b) => a + Math.random() * (b - a);
+const easeOutExpo = t => 1 - Math.pow(2, -10 * t);
+const easeOutBack = t => { const c = 1.70158; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); };
+
+function rr(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+  c.closePath();
+}
+
+/* ---------- pre-rendered glow sprites (fast: no per-frame shadowBlur) ---------- */
+function brickSprite(color) {
+  const pad = 34, w = 128, h = 62;
+  const s = document.createElement('canvas'); s.width = w + pad * 2; s.height = h + pad * 2;
+  const c = s.getContext('2d');
+  c.shadowColor = color; c.shadowBlur = 26;
+  const g = c.createLinearGradient(0, pad, 0, pad + h);
+  g.addColorStop(0, '#ffffff'); g.addColorStop(0.18, color); g.addColorStop(1, color);
+  c.fillStyle = g; rr(c, pad, pad, w, h, 14); c.fill();
+  c.shadowBlur = 0;
+  c.fillStyle = 'rgba(255,255,255,0.35)'; rr(c, pad + 8, pad + 6, w - 16, 14, 7); c.fill();
+  return s;
+}
+function ballSprite() {
+  const s = document.createElement('canvas'); s.width = 120; s.height = 120;
+  const c = s.getContext('2d');
+  const g = c.createRadialGradient(60, 60, 2, 60, 60, 58);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.25, 'rgba(160,240,255,0.95)');
+  g.addColorStop(0.55, 'rgba(64,180,255,0.35)');
+  g.addColorStop(1, 'rgba(64,180,255,0)');
+  c.fillStyle = g; c.fillRect(0, 0, 120, 120);
+  return s;
+}
+const BALL_SPRITE = ballSprite();
+
+/* ---------- field ---------- */
+const ROW_COLORS = ['#ff3860', '#ff9f1c', '#ffe93d', '#3dff8f', '#2ec4ff', '#b26bff'];
+const COLS = 7, ROWS = 6, BW = 128, BH = 62, GAP = 15;
+const FIELD_W = COLS * BW + (COLS - 1) * GAP;
+const OX = (W - FIELD_W) / 2, OY = 350;
+const sprites = ROW_COLORS.map(brickSprite);
+let bricks = [];
+
+function buildBricks() {
+  bricks = [];
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
+      bricks.push({ x: OX + c * (BW + GAP), y: OY + r * (BH + GAP), row: r, alive: true, born: performance.now() / 1000 + (r * COLS + c) * 0.012 });
+}
+
+/* ---------- state ---------- */
+const DEMO = new URLSearchParams(location.search).has('demo');
+let score = 0, combo = 0, level = 1, trauma = 0, flash = 0, banner = null;
+let particles = [], floats = [], trail = [];
+const stars = Array.from({ length: 70 }, () => ({ x: Math.random() * W, y: Math.random() * H, s: rand(1, 3), p: rand(0, 6.28) }));
+
+const paddle = { x: W / 2, w: 252, h: 30, y: H - 210, squash: 0, squashV: 0, target: W / 2 };
+const ball = { x: W / 2, y: paddle.y - 40, vx: 0, vy: 0, r: 15, stuck: true, speed: 800, launchAt: 0 };
+
+function launchBall(now) {
+  const ang = -Math.PI / 2 + rand(-0.42, 0.42);
+  ball.vx = Math.cos(ang) * ball.speed;
+  ball.vy = Math.sin(ang) * ball.speed;
+  ball.stuck = false;
+  paddle.squashV = -340; // anticipation dip, then the spring throws it back
+}
+
+function burst(x, y, color, n, power) {
+  for (let i = 0; i < n; i++) {
+    if (particles.length > 340) return;
+    const a = Math.random() * Math.PI * 2, sp = rand(60, power);
+    particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 60, life: 1, decay: rand(1.1, 2.2), size: rand(3, 9), color });
+  }
+}
+function floatText(x, y, str, color, size) {
+  floats.push({ x, y, str, color, size: size || 40, life: 1 });
+}
+
+/* ---------- input ---------- */
+let pointerX = null;
+addEventListener('pointermove', e => {
+  const rect = cv.getBoundingClientRect();
+  pointerX = (e.clientX - rect.left) / rect.width * W;
+});
+addEventListener('pointerdown', () => { if (ball.stuck) launchBall(performance.now() / 1000); });
+addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft') paddle.target -= 60;
+  if (e.key === 'ArrowRight') paddle.target += 60;
+  if (e.key === ' ' && ball.stuck) launchBall(performance.now() / 1000);
+});
+
+/* autopilot: predicts the intercept, eases toward it like a good player */
+function aiTarget(t) {
+  if (ball.stuck) return W / 2 + Math.sin(t * 0.9) * 120;
+  if (ball.vy <= 0) return W / 2 + Math.sin(t * 1.3) * 160;
+  const dt = (paddle.y - ball.y) / ball.vy;
+  let px = ball.x + ball.vx * dt;
+  const span = W - ball.r * 2;
+  px = ((px - ball.r) % (2 * span) + 2 * span) % (2 * span);
+  if (px > span) px = 2 * span - px;
+  return px + ball.r + Math.sin(t * 2.1) * 14;
+}
+
+/* ---------- update ---------- */
+function step(dt, t) {
+  /* paddle */
+  const tgt = DEMO ? aiTarget(t) : (pointerX !== null ? pointerX : paddle.target);
+  const maxV = 1650;
+  const dx = clamp(tgt - paddle.x, -maxV * dt, maxV * dt);
+  paddle.x = clamp(paddle.x + dx, paddle.w / 2 + 8, W - paddle.w / 2 - 8);
+  /* squash spring (follow-through) */
+  const acc = -paddle.squash * 260 - paddle.squashV * 14;
+  paddle.squashV += acc * dt; paddle.squash += paddle.squashV * dt;
+
+  if (ball.stuck) {
+    ball.x = paddle.x; ball.y = paddle.y - 34;
+    if (DEMO && t > ball.launchAt) launchBall(t);
+  } else {
+    ball.x += ball.vx * dt; ball.y += ball.vy * dt;
+    /* walls */
+    if (ball.x < ball.r + 6) { ball.x = ball.r + 6; ball.vx = Math.abs(ball.vx); burst(ball.x, ball.y, '#9adcff', 5, 260); }
+    if (ball.x > W - ball.r - 6) { ball.x = W - ball.r - 6; ball.vx = -Math.abs(ball.vx); burst(ball.x, ball.y, '#9adcff', 5, 260); }
+    if (ball.y < ball.r + 6) { ball.y = ball.r + 6; ball.vy = Math.abs(ball.vy); }
+    /* paddle */
+    if (ball.vy > 0 && ball.y + ball.r >= paddle.y && ball.y - ball.r <= paddle.y + paddle.h &&
+        Math.abs(ball.x - paddle.x) <= paddle.w / 2 + ball.r) {
+      const rel = clamp((ball.x - paddle.x) / (paddle.w / 2), -1, 1);
+      const ang = -Math.PI / 2 + rel * 1.02;
+      ball.vx = Math.cos(ang) * ball.speed; ball.vy = Math.sin(ang) * ball.speed;
+      ball.y = paddle.y - ball.r - 1;
+      paddle.squashV = 420;
+      trauma = Math.min(1, trauma + 0.10);
+      burst(ball.x, paddle.y, '#ffffff', 7, 320);
+      if (Math.abs(rel) < 0.18) { /* perfect catch: dead-centre, pays a bonus */
+        score += 5;
+        floatText(paddle.x, paddle.y - 56, 'PERFECT +5', '#8be9ff', 36);
+      }
+    }
+    /* bricks */
+    for (const b of bricks) {
+      if (!b.alive) continue;
+      const nx = clamp(ball.x, b.x, b.x + BW), ny = clamp(ball.y, b.y, b.y + BH);
+      const ddx = ball.x - nx, ddy = ball.y - ny;
+      if (ddx * ddx + ddy * ddy <= ball.r * ball.r) {
+        b.alive = false;
+        combo++; score += 10;
+        ball.speed = Math.min(1280, ball.speed + 9);
+        const sp = Math.hypot(ball.vx, ball.vy) || 1;
+        if (Math.abs(ddx) > Math.abs(ddy)) ball.vx = (ddx > 0 ? 1 : -1) * Math.abs(ball.vx); else ball.vy = (ddy > 0 ? 1 : -1) * Math.abs(ball.vy);
+        ball.vx *= ball.speed / sp; ball.vy *= ball.speed / sp;
+        burst(b.x + BW / 2, b.y + BH / 2, ROW_COLORS[b.row], 13, 430);
+        floatText(b.x + BW / 2, b.y + BH / 2, '+10', ROW_COLORS[b.row], 38);
+        trauma = Math.min(1, trauma + 0.13);
+        if (combo > 0 && combo % 10 === 0) banner = { str: 'COMBO ×' + combo, t0: t, color: '#ffe93d' };
+        break;
+      }
+    }
+    /* lost */
+    if (ball.y - ball.r > H + 30) {
+      combo = 0; flash = 1; ball.stuck = true; ball.speed = 800 + (level - 1) * 60;
+      ball.launchAt = t + 0.8;
+    }
+    /* level clear */
+    if (bricks.every(b => !b.alive)) {
+      level++; buildBricks();
+      banner = { str: 'LEVEL ' + level, t0: t, color: '#3dff8f' };
+      ball.stuck = true; ball.speed = 800 + (level - 1) * 70; ball.launchAt = t + 0.9;
+      flash = 0.6;
+    }
+  }
+  /* trail (arcs) */
+  trail.unshift({ x: ball.x, y: ball.y });
+  if (trail.length > 16) trail.pop();
+  /* particles */
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 620 * dt; p.vx *= 0.985; p.life -= p.decay * dt; }
+  particles = particles.filter(p => p.life > 0);
+  for (const f of floats) { f.y -= 66 * dt; f.life -= dt * 0.9; }
+  floats = floats.filter(f => f.life > 0);
+  trauma = Math.max(0, trauma - dt * 2.4);
+  flash = Math.max(0, flash - dt * 1.8);
+}
+
+/* ---------- draw ---------- */
+function draw(t) {
+  ctx.save();
+  const sh = trauma * trauma * 17;
+  ctx.translate(rand(-sh, sh), rand(-sh, sh));
+  /* background */
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0b0b1c'); g.addColorStop(0.6, '#07070f'); g.addColorStop(1, '#0d0518');
+  ctx.fillStyle = g; ctx.fillRect(-30, -30, W + 60, H + 60);
+  ctx.strokeStyle = 'rgba(90,90,180,0.10)'; ctx.lineWidth = 1;
+  const gridOff = (t * 26) % 96;
+  for (let y = gridOff - 96; y < H; y += 96) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  for (let x = 0; x <= W; x += 96) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (const s of stars) {
+    ctx.globalAlpha = 0.25 + 0.2 * Math.sin(t * 1.4 + s.p);
+    ctx.fillStyle = '#a8c8ff'; ctx.fillRect(s.x, s.y, s.s, s.s);
+  }
+  ctx.globalAlpha = 1;
+
+  /* bricks (staggered pop-in) */
+  for (const b of bricks) {
+    if (!b.alive) continue;
+    const age = clamp((t - b.born) * 3.2, 0, 1), e = easeOutBack(age);
+    const cx = b.x + BW / 2, cy = b.y + BH / 2;
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(e, e); ctx.translate(-cx, -cy);
+    ctx.drawImage(sprites[b.row], b.x - 34, b.y - 34);
+    ctx.restore();
+  }
+
+  /* trail */
+  for (let i = trail.length - 1; i >= 3; i--) {
+    const p = trail[i], a = (1 - i / trail.length) * 0.20;
+    ctx.globalAlpha = a; ctx.fillStyle = '#54c8ff';
+    ctx.beginPath(); ctx.arc(p.x, p.y, ball.r * (1 - i / trail.length) * 0.9, 0, 6.2832); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  /* ball (stretch along velocity) */
+  const sp = Math.hypot(ball.vx, ball.vy);
+  ctx.save();
+  ctx.translate(ball.x, ball.y);
+  if (!ball.stuck && sp > 1) {
+    ctx.rotate(Math.atan2(ball.vy, ball.vx));
+    const st = clamp(sp / 2600, 0, 0.38);
+    ctx.scale(1 + st, 1 - st * 0.6);
+  }
+  ctx.drawImage(BALL_SPRITE, -60, -60);
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.arc(0, 0, ball.r * 0.62, 0, 6.2832); ctx.fill();
+  ctx.restore();
+
+  /* paddle (squash & stretch) */
+  const sq = clamp(paddle.squash / 300, -0.45, 0.6);
+  ctx.save();
+  ctx.translate(paddle.x, paddle.y + paddle.h / 2);
+  ctx.scale(1 + Math.abs(sq) * 0.35, 1 - sq * 0.5);
+  const pg = ctx.createLinearGradient(0, -paddle.h / 2, 0, paddle.h / 2);
+  pg.addColorStop(0, '#fdfdff'); pg.addColorStop(0.35, '#8be9ff'); pg.addColorStop(1, '#2f7bff');
+  ctx.shadowColor = '#39a7ff'; ctx.shadowBlur = 30;
+  ctx.fillStyle = pg; rr(ctx, -paddle.w / 2, -paddle.h / 2, paddle.w, paddle.h, 15); ctx.fill();
+  ctx.restore();
+
+  /* particles & floats */
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+  ctx.textAlign = 'center';
+  for (const f of floats) {
+    ctx.globalAlpha = Math.max(0, f.life);
+    ctx.font = '700 ' + f.size + 'px Inter, sans-serif';
+    ctx.fillStyle = f.color;
+    ctx.fillText(f.str, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+
+  /* HUD */
+  ctx.textAlign = 'center';
+  const tg = ctx.createLinearGradient(0, 60, 0, 130);
+  tg.addColorStop(0, '#ffffff'); tg.addColorStop(1, '#7dd7ff');
+  ctx.fillStyle = tg;
+  ctx.font = '800 54px Inter, sans-serif';
+  ctx.fillText('N E O N   B R E A K E R', W / 2, 118);
+  ctx.font = '700 40px "JetBrains Mono", monospace';
+  ctx.textAlign = 'left'; ctx.fillStyle = '#e8f4ff';
+  ctx.fillText('SCORE ' + score, 56, 205);
+  ctx.textAlign = 'right';
+  const pop = banner && banner.str.startsWith('COMBO') ? 1 : 1;
+  ctx.fillStyle = combo >= 10 ? '#ffe93d' : '#e8f4ff';
+  ctx.fillText('COMBO ×' + combo, W - 56, 205);
+  ctx.textAlign = 'center';
+  ctx.font = '600 30px Inter, sans-serif'; ctx.fillStyle = 'rgba(200,220,255,0.55)';
+  ctx.fillText('LEVEL ' + level, W / 2, 205);
+
+  /* banner (overshoot entrance, then settle) */
+  if (banner) {
+    const age = t - banner.t0;
+    if (age < 1.15) {
+      const e = easeOutBack(clamp(age / 0.38, 0, 1));
+      ctx.save();
+      ctx.translate(W / 2, 900); ctx.scale(e, e);
+      ctx.globalAlpha = age > 0.85 ? 1 - (age - 0.85) / 0.3 : 1;
+      ctx.font = '800 96px Inter, sans-serif';
+      ctx.fillStyle = banner.color;
+      ctx.shadowColor = banner.color; ctx.shadowBlur = 34;
+      ctx.fillText(banner.str, 0, 0);
+      ctx.restore();
+    } else banner = null;
+  }
+
+  /* loss flash */
+  if (flash > 0) {
+    ctx.fillStyle = 'rgba(255,40,70,' + (flash * 0.16) + ')';
+    ctx.fillRect(-30, -30, W + 60, H + 60);
+  }
+  ctx.restore();
+
+  if (ball.stuck && !DEMO) {
+    ctx.font = '600 34px Inter, sans-serif'; ctx.fillStyle = 'rgba(220,235,255,0.75)';
+    ctx.textAlign = 'center';
+    ctx.fillText('move to play — click to launch', W / 2, H - 90);
+  }
+}
+
+/* ---------- loop ---------- */
+buildBricks();
+ball.launchAt = 0.9;
+let last = performance.now() / 1000;
+function frame() {
+  const now = performance.now() / 1000;
+  const dt = Math.min(now - last, 1 / 30); last = now;
+  step(dt, now);
+  draw(now);
+  window.__neon = { score, combo, level, bricksLeft: bricks.filter(b => b.alive).length };
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
